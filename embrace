@@ -1,0 +1,241 @@
+#! /usr/bin/perl
+
+@blocks = ( '.' );
+@blanks = ();
+
+$offside = 1;
+$preproc = 0;
+
+sub semicolon {
+	if ($delimited and $offside) {
+		print ';';
+	}
+}
+
+sub lbrace {
+	if ($offside and @blocks[-1] ne '#') {
+		print ' {';
+	}
+}
+
+sub rbraces {
+	if (@blocks[-2] ne '#') {
+		semicolon ();
+	}
+	for (1 .. $_[0]) {
+		pop @blocks;
+		if ($offside and @blocks[-1] ne '#') {
+			print ' }';
+		}
+		if (@blocks[-1] eq '#') {
+			@blocks[-1] = '.';
+			$preproc = 0;
+		}
+		elsif (@blocks[-1] eq '\\') {
+			@blocks[-1] = '.';
+			$offside = 1;
+			print ' )';
+			semicolon ();
+		}
+	}
+}
+
+sub space {
+	if ($preproc) {
+		print ' \\';
+	}
+	print (join '', @blanks);
+	@blanks = ();
+	print "$newline$hash$indent";
+}
+
+sub expr {
+	if ($hash or $preproc or $concat or not $offside) {
+		print $_[0];
+	}
+	else {
+		@sexps = ();
+		$quoted = 0;
+		$called = 0;
+		$depth = 0;
+		for (split /([()"\\])/, $_[0]) {
+			#print STDERR "  << $_\n";
+			#print STDERR '  >> ';
+			# HACK "silent backslash call"
+			# convenience for string concatenation via macros
+			# to prevent the need for prohibiting parentheses
+			# might become unnecessary with smarter parentheses
+			# that do not double up when enclosing the function name
+			# and all its parameters
+			if ($_ eq '\\' and not $quoted) {
+				print ')';
+				#print STDERR ')';
+				$called = 0;
+				$depth--;
+				next;
+			}
+			elsif ($_ eq ')') {
+				print ')' x $depth;
+				#print STDERR ')' x $depth;
+				$called = 0;
+				while (@sexps[-1] eq '$') {
+					print ')';
+					#print STDERR ')';
+					pop @sexps;
+				}
+				$depth = pop @sexps;
+			}
+			else {
+				if ($called) {
+					print '(';
+					#print STDERR '(';
+					$depth++;
+				}
+				if ($_ eq '(') {
+					push @sexps, $depth;
+					$depth = 0;
+					$called = 0;
+				}
+				elsif ($_ eq "\"") {
+					$quoted = not $quoted;
+					$called = 0;
+				}
+				elsif (not $quoted) {
+					$called = $_ =~ / \b \w+ \s*$/x;
+					$depth += s/ (\w+) \s+ (?=\w) /$1 (/gx;
+				}
+			}
+			#print STDERR "$_\n";
+			#print STDERR "   : {@sexps} [$depth]\n";
+			print $_;
+		}
+		#print STDERR "   : {@sexps} [$depth]\n";
+		while (scalar @sexpr) {
+			if (@sexps[-1] eq '$') {
+				$depth++;
+				pop @sexps;
+			}
+			else {
+				$depth += pop @sexps;
+			}
+		}
+		print ')' x $depth;
+		#print STDERR ')' x $depth;
+		#print STDERR "\n   : {@sexps} [$depth]\n";
+	}
+}
+
+open ($SOURCE, $ARGV[0]);
+open ($HEADER, '>&=3');
+
+while ($line = <$SOURCE>) {
+
+	($indent, $hash, $content, $backslash)  =
+		$line =~ /^(\t*)(#?)(.*?)(\\?)\s*(?:\/\/.*)?\n$/;
+
+	($lhs, $equals, $rhs) =
+		$content =~ /^ (.*?) (?: (?<=\s|\w) (=) (?=\s|\w) (.*) )? $/x;
+
+	($pie, $verb, $case, $colon, $class, $rest) =
+		$lhs =~ /^
+			\s* (@?)(\w*)
+			\s* ((?: [^'"?:]* (?: '[^']'|"[^"]*" )? )*)
+			(?: (:) (.*) )?
+			(.*)
+		$/x;
+
+	($type, $sig) =
+		$class =~ /^ ([^(]*) (\(.*\))? $/x;
+
+	$previous = scalar @blocks;
+
+	if (not ($hash or $content or $backslash)) {
+		push @blanks, "\n" . ("\t" x $previous);
+		next;
+	}
+
+	$current = (length $indent) + 1;
+	$change = $current - $previous;
+
+	if (not $class) {
+		$label = length $colon;
+		$change += length $colon;
+	}
+	else {
+		$label = 0;
+	}
+
+	$concat = $backslash || ($offside and $content =~ / (?:\(|,) \s* $/x);
+
+	if ($change == 0) {
+		semicolon ();
+		if (@blocks[-1] eq '#') {
+			@blocks[-1] = '.';
+			$preproc = 0;
+		}
+		elsif (@blocks[-1] eq '\\') {
+			@blocks[-1] = '.';
+			$offside = 1;
+		};
+		space ();
+	}
+	elsif ($change > 0) {
+		lbrace ();
+		space ();
+		push @blocks, '.';
+	}
+	elsif ($change < 0) {
+		rbraces (-$change);
+		space ();
+	}
+
+	$newline = "\n";
+
+	if ($current == 1 and not $pie and $colon and $class) {
+		print 'static ';
+	}
+	print "$type $verb $sig";
+	#print STDERR "$. $content\n";
+
+	if (length $case or length $rest or length $rhs) {
+		$parens = ($current - $preproc) > 1 && $offside &&
+			not ($hash or $colon or ($rhs and $lhs !~ / \w \s+ (?:\w|\(|") /x));
+
+		if ($parens) {
+			print '(';
+		}
+		expr ($case);
+		print " $rest $equals ";
+		expr ($rhs);
+		#print STDERR " >> $rhs \n";
+		if ($parens and not $concat) {
+			print ')';
+		}
+	}
+
+	if ($label) {
+		print $colon;
+	}
+	if ($current == 1 and $pie and $colon and $class) {
+		print $HEADER "\n$type $verb $sig";
+		if (not $concat) {
+			print $HEADER ';';
+		}
+	}
+
+	if ($hash) {
+		$preproc = 1;
+		@blocks[-1] = '#';
+	}
+	elsif ($concat) {
+		$offside = 0;
+		@blocks[-1] = '\\';
+	}
+
+	if ($offside) {
+		$delimited = (not $hash) && (not $label);
+	}
+}
+
+rbraces (scalar @blocks - 1);
+print "\n";
